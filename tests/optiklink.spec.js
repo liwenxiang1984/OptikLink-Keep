@@ -328,7 +328,7 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         await panelPage.click('button[type="submit"]');
 
         console.log('⏳ 确认到达控制台首页...');
-        await panelPage.waitForURL(url => !url.includes('/auth/login'), { timeout: TIMEOUT });
+        await panelPage.waitForURL(url => !url.toString().includes('/auth/login'), { timeout: TIMEOUT });
         console.log(`✅ 控制台登录成功！当前：${panelPage.url()}`);
 
         await panelPage.waitForTimeout(2000);
