@@ -3,7 +3,6 @@ const { test, chromium } = require('@playwright/test');
 const https = require('https');
 
 const [email, password] = (process.env.DISCORD_ACCOUNT || ',').split(',');
-const discordToken = process.env.DISCORD_TOKEN || ''; // 👈 新增获取 Token
 const [panelUser, panelPass] = (process.env.PANEL_ACCOUNT || ',').split(',');
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
@@ -130,8 +129,22 @@ test('OptikLink 保活', async ({ }, testInfo) => {
 
     let proxyConfig = undefined;
     if (process.env.GOST_PROXY) {
-        proxyConfig = { server: process.env.GOST_PROXY };
-        console.log(`🛡️ 使用环境变量代理: ${process.env.GOST_PROXY}`);
+        try {
+            const http = require('http');
+            await new Promise((resolve, reject) => {
+                const req = http.request(
+                    { host: '127.0.0.1', port: 8080, path: '/', method: 'GET', timeout: 3000 },
+                    () => resolve()
+                );
+                req.on('error', reject);
+                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+                req.end();
+            });
+            proxyConfig = { server: process.env.GOST_PROXY };
+            console.log('🛡️ 本地代理连通，使用 GOST 转发');
+        } catch {
+            console.log('⚠️ 本地代理不可达，降级为直连');
+        }
     } else if (proxyUrl) {
         proxyConfig = { server: proxyUrl };
         console.log(`🛡️ 使用代理: ${proxyUrl.replace(/:\/\/.*@/, '://***@')}`);
@@ -239,42 +252,28 @@ test('OptikLink 保活', async ({ }, testInfo) => {
             console.log('⚠️ IP 验证超时，跳过');
         }
 
-        // ========== 新增 Token 注入逻辑 ==========
-        if (discordToken) {
-            console.log('🔑 准备注入 Discord Token 免密登录...');
-            await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
-            // 使用 iframe 绕过 Discord 对 localStorage 的屏蔽
-            await page.evaluate((t) => {
-                document.body.appendChild(document.createElement('iframe')).contentWindow.localStorage.token = `"${t}"`;
-            }, discordToken);
-            console.log('✅ Token 注入完成');
-        }
-
         console.log('🔑 打开 OptikLink 登录页...');
         await page.goto('https://optiklink.com/auth', { waitUntil: 'domcontentloaded' });
 
         console.log('📤 点击 Login with Discord...');
-        await page.locator('text=Login with Discord').click().catch(() => page.click("a[href='login']"));
+        await page.click("a[href='login']");
 
-        // ========== 修改：如果没有配置 Token 才走账密登录 ==========
-        if (!discordToken) {
-            console.log('⏳ 等待跳转 Discord 登录页...');
-            await page.waitForURL(/discord\.com\/login/, { timeout: TIMEOUT });
+        console.log('⏳ 等待跳转 Discord 登录页...');
+        await page.waitForURL(/discord\.com\/login/, { timeout: TIMEOUT });
 
-            console.log('✏️ 填写账号密码...');
-            await page.fill('input[name="email"]', email);
-            await page.fill('input[name="password"]', password);
+        console.log('✏️ 填写账号密码...');
+        await page.fill('input[name="email"]', email);
+        await page.fill('input[name="password"]', password);
 
-            console.log('📤 提交登录请求...');
-            await page.click('button[type="submit"]');
-            await page.waitForTimeout(2000);
+        console.log('📤 提交登录请求...');
+        await page.click('button[type="submit"]');
+        await page.waitForTimeout(2000);
 
-            if (/discord\.com\/login/.test(page.url())) {
-                let err = '账密错误或触发了 2FA / 验证码 / hCaptcha';
-                try { err = await page.locator('[class*="errorMessage"]').first().innerText(); } catch {}
-                await sendTG(`❌ Discord 登录失败：${err}`);
-                throw new Error(`❌ Discord 登录失败: ${err}`);
-            }
+        if (/discord\.com\/login/.test(page.url())) {
+            let err = '账密错误或触发了 2FA / 验证码';
+            try { err = await page.locator('[class*="errorMessage"]').first().innerText(); } catch {}
+            await sendTG(`❌ Discord 登录失败：${err}`);
+            throw new Error(`❌ Discord 登录失败: ${err}`);
         }
 
         console.log('⏳ 等待 OAuth 授权...');
