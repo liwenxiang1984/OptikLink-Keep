@@ -62,7 +62,7 @@ function sendTG(result, serverName = 'OptikLink') {
     });
 }
 
-// 处理 Discord 登录页（填账密），内部静默执行
+// 处理 Discord 登录页（填账密）
 async function handleDiscordLogin(page, email, password) {
     await page.fill('input[name="email"]', email);
     await page.fill('input[name="password"]', password);
@@ -76,7 +76,7 @@ async function handleDiscordLogin(page, email, password) {
     }
 }
 
-// 处理 Discord OAuth 授权页，内部静默执行
+// 处理 Discord OAuth 授权页
 async function handleOAuthPage(page) {
     await page.waitForTimeout(2000);
 
@@ -253,10 +253,6 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         await page.click("a[href='login']");
 
         console.log('⏳ 等待跳转 Discord 登录页...');
-        // 等待离开 /auth，判断实际落地：
-        //   A. discord.com/login   → 没有登录态，需填账密
-        //   B. discord.com/oauth2  → 有登录态但需授权（或按钮是 Log In 则先登录）
-        //   C. optiklink.net       → 全程静默完成
         await page.waitForURL(url => !url.toString().includes('optiklink.com/auth'), { timeout: TIMEOUT });
 
         const landedUrl = page.url();
@@ -303,7 +299,7 @@ test('OptikLink 保活', async ({ }, testInfo) => {
             }
         }
 
-        // 处理可能出现的 OAuth 授权页（静默执行，无额外日志）
+        // 处理可能出现的 OAuth 授权页
         console.log('⏳ 等待 OAuth 授权...');
         try {
             await page.waitForURL(/discord\.com\/oauth2\/authorize/, { timeout: 6000 });
@@ -320,6 +316,34 @@ test('OptikLink 保活', async ({ }, testInfo) => {
             if (e.message.includes('Discord 登录失败')) throw e;
         }
 
+        // ✅ 修复：OAuth 授权后若被重定向回 discord.com/login，再次填写账密登录
+        if (page.url().includes('discord.com/login')) {
+            console.log('🔄 OAuth 后被重定向至登录页，再次填写账号密码...');
+            await page.fill('input[name="email"]', email);
+            await page.fill('input[name="password"]', password);
+            console.log('📤 提交登录请求...');
+            await page.click('button[type="submit"]');
+            try {
+                await page.waitForURL(url => !url.toString().includes('discord.com/login'), { timeout: 20000 });
+                console.log(`✅ 二次登录后跳转至：${page.url()}`);
+            } catch {
+                let err = '账密错误或触发了 2FA / 验证码';
+                try { err = await page.locator('[class*="errorMessage"]').first().innerText(); } catch {}
+                await sendTG(`❌ Discord 二次登录失败：${err}`);
+                throw new Error(`❌ Discord 二次登录失败: ${err}`);
+            }
+
+            // 二次登录后可能再次出现 OAuth 授权页
+            if (page.url().includes('discord.com/oauth2')) {
+                console.log('🔍 二次进入 OAuth 授权页，处理中...');
+                await handleOAuthPage(page);
+                try {
+                    await page.waitForURL(/optiklink\.net/, { timeout: 15000 });
+                } catch { /* 继续 */ }
+                console.log(`✅ OAuth 二次处理完成，当前：${page.url()}`);
+            }
+        }
+
         console.log('⏳ 确认到达 OptikLink...');
         try {
             await page.waitForURL(/optiklink\.net/, { timeout: 30000 });
@@ -334,16 +358,11 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         await page.click('a[data-target="#logintopanel"]');
         await page.waitForTimeout(2000);
 
-        console.log('📤 点击 Panel Login...');
-        const [panelPage] = await Promise.all([
-            page.context().waitForEvent('page'),
-            page.click('a[href="https://control.optiklink.net/auth/login"]'),
-        ]);
-
+        console.log('📤 直接导航到控制台登录页...');
+        const panelPage = page;
         panelPage.setDefaultTimeout(TIMEOUT);
         activePage = panelPage;
-        console.log('⏳ 等待跳转控制台登录页...');
-        await panelPage.waitForURL(/control\.optiklink\.net\/auth\/login/, { timeout: TIMEOUT });
+        await panelPage.goto('https://control.optiklink.net/auth/login', { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
         console.log(`✅ 已到达控制台登录页：${panelPage.url()}`);
 
         console.log('✏️ 填写控制台账号密码...');
@@ -389,21 +408,22 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         console.log('🔍 检查服务器状态...');
         await serverPage.waitForTimeout(3000);
 
-        // 若服务器处于 CONNECTING / STARTING 等中间态，等待稳定
+        // 若服务器处于 CONNECTING 等中间态，等待稳定
+        // STARTING 视为正常状态，无需等待
         let statusText = '';
         for (let i = 0; i < 12; i++) {
             statusText = await serverPage.locator('p.sc-168cvuh-1').innerText().catch(() => '');
             const s = statusText.toLowerCase();
-            if (s.includes('running') || s.includes('offline') || s.includes('stopped')) break;
+            if (s.includes('running') || s.includes('starting') || s.includes('offline') || s.includes('stopped')) break;
             console.log(`  🔄 等待状态稳定（${statusText.trim()}）...`);
             await serverPage.waitForTimeout(5000);
         }
 
         console.log(`💻 服务器状态：${statusText.trim()}`);
 
-        if (statusText.toLowerCase().includes('running')) {
+        if (statusText.toLowerCase().includes('running') || statusText.toLowerCase().includes('starting')) {
             console.log('🎉 保活成功！');
-            await sendTG('✅ 保活成功！\n💻 服务器状态：🚀 Running', serverInfo.name);
+            await sendTG(`✅ 保活成功！\n💻 服务器状态：🚀 ${statusText.trim()}`, serverInfo.name);
         } else if (statusText.toLowerCase().includes('offline') || statusText.toLowerCase().includes('stopped')) {
             console.log('⚠️ 服务器离线，尝试启动...');
             await serverPage.click('button:has-text("Start")');
@@ -414,7 +434,7 @@ test('OptikLink 保活', async ({ }, testInfo) => {
                 await serverPage.waitForTimeout(5000);
                 const s = await serverPage.locator('p.sc-168cvuh-1').innerText().catch(() => '');
                 console.log(`  🔄 第 ${i + 1} 次检查，状态：${s.trim()}`);
-                if (s.toLowerCase().includes('running')) {
+                if (s.toLowerCase().includes('running') || s.toLowerCase().includes('starting')) {
                     started = true;
                     break;
                 }
@@ -422,7 +442,7 @@ test('OptikLink 保活', async ({ }, testInfo) => {
 
             if (started) {
                 console.log('✅ 服务器已成功启动！');
-                await sendTG('🔄 Start 启动！\n💻 服务器状态：🚀 Running', serverInfo.name);
+                await sendTG('🔄 Start 启动！\n💻 服务器状态：🚀 Running / Starting', serverInfo.name);
             } else {
                 console.log('❌ 等待超时，服务器未能启动');
                 await sendTG('❌ Start 启动失败，等待超时\n💻 服务器状态：💤 Offline', serverInfo.name);
